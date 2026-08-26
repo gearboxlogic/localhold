@@ -69,6 +69,21 @@ def parse_needed(output: str) -> set[str]:
     return set(NEEDED.findall(output))
 
 
+def needed_libraries(path: Path) -> set[str]:
+    """Read an ELF dependency table without passing its path to readelf."""
+    with path.open("rb") as elf:
+        result = subprocess.run(
+            ["readelf", "-d", "--", "/proc/self/fd/0"],
+            check=False,
+            stdin=elf,
+            capture_output=True,
+            text=True,
+        )
+    if result.returncode != 0:
+        raise ValidationError(f"readelf could not inspect {path.name}: {result.stderr.strip()}")
+    return parse_needed(result.stdout)
+
+
 def validate_files(root: Path, manifest: dict[str, object]) -> set[str]:
     """Verify exact inventory, hashes, sizes, and native dependency closure."""
     records = declared_files(manifest)
@@ -114,15 +129,7 @@ def validate_files(root: Path, manifest: dict[str, object]) -> set[str]:
     allowed = libraries | {str(library) for library in system}
     for library in sorted(libraries):
         path = root / "lib" / library
-        result = subprocess.run(
-            ["readelf", "-d", str(path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise ValidationError(f"readelf could not inspect {library}: {result.stderr.strip()}")
-        unresolved = parse_needed(result.stdout) - allowed
+        unresolved = needed_libraries(path) - allowed
         if unresolved:
             raise ValidationError(f"{library} has undeclared native dependencies: {sorted(unresolved)}")
     return libraries

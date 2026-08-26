@@ -142,8 +142,9 @@ fn rust_codegen_dispatch_option_is_opaque(option: &str) -> bool {
 }
 
 fn rust_unstable_dispatch_option_is_opaque(option: &str) -> bool {
-    let name = option.split_once('=').map(|(name, _)| name.replace('_', "-"));
-    matches!(name.as_deref(), Some("llvm-plugins" | "codegen-backend"))
+    option
+        .split_once('=')
+        .is_some_and(|(name, _)| matches!(name.replace('_', "-").as_str(), "llvm-plugins" | "codegen-backend"))
 }
 
 fn rustdoc_dispatch_is_opaque(arguments: &[String]) -> bool {

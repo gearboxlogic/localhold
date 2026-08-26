@@ -357,7 +357,10 @@ fn reviewed_expression(path: &str, expression: &str, source_is_reviewed: bool) -
             | ("script/install.sh", "$# > 0" | "$# >= 2")
             | (
                 "script/check-maintainability-bootstrap.sh",
-                "expected_count += 1"
+                "$# < 2"
+                    | "$# > 0"
+                    | "$# == 0"
+                    | "expected_count += 1"
                     | "expected_count == 0"
                     | "observed_count += 1"
                     | "observed_count != expected_count"
@@ -365,10 +368,16 @@ fn reviewed_expression(path: &str, expression: &str, source_is_reviewed: bool) -
                     | "indexed_count != expected_count"
                     | "status == 0"
             )
-            | ("script/claude-review.sh", "status == 0")
+            | (
+                "script/claude-review.sh",
+                "$# < 1 || $# > 2" | "$# == 1" | "attempt = 0; attempt < 100; attempt++" | "status == 0"
+            )
             | ("script/run-maintainability-gate.sh", "$# != 1")
             | ("script/test-postgres-smoke.sh", "$status")
-            | ("script/tests/test_claude_review.sh", "status != 23" | "status != 143")
+            | (
+                "script/tests/test_claude_review.sh",
+                "count += 1" | "count > 101" | "expected_status == 1" | "status != 23" | "status != 143" | "status != expected_status"
+            )
             | (
                 "script/tests/test_maintainability_bootstrap.sh",
                 "guard_count != 2" | "loader_guard_count != 2" | "SECONDS + 300" | "SECONDS < deadline" | "snapshot_status != 0"
@@ -456,6 +465,32 @@ CARGO_TARGET_TEST_LINKER CARGO_TARGET_TEST_RUNNER; do
             &reviewed_environment_scan.replace("local uppercase", "local changed"),
             true
         ));
+    }
+
+    #[test]
+    fn reviewed_scalar_arithmetic_is_bound_to_exact_sources_and_paths() {
+        for (path, source) in [
+            ("script/check-maintainability-bootstrap.sh", "if (( $# < 2 )); then"),
+            ("script/check-maintainability-bootstrap.sh", "if (( $# > 0 )); then"),
+            ("script/check-maintainability-bootstrap.sh", "(( $# == 0 )) || usage"),
+            ("script/claude-review.sh", "if (( $# < 1 || $# > 2 )); then"),
+            ("script/claude-review.sh", "if (( $# == 1 )); then"),
+            ("script/claude-review.sh", "for (( attempt = 0; attempt < 100; attempt++ )); do"),
+            ("script/tests/test_claude_review.sh", "(( count += 1 ))"),
+            ("script/tests/test_claude_review.sh", "if (( count > 101 )); then"),
+            ("script/tests/test_claude_review.sh", "if (( status != expected_status )); then"),
+            ("script/tests/test_claude_review.sh", "if (( expected_status == 1 )); then"),
+        ] {
+            assert!(!has_opaque_evaluation(path, source, true), "{path}: {source}");
+            assert!(has_opaque_evaluation(path, source, false), "{path}: {source}");
+            assert!(has_opaque_evaluation("script/unreviewed.sh", source, true), "{path}: {source}");
+        }
+        assert!(has_opaque_evaluation(
+            "script/claude-review.sh",
+            "for (( attempt = 0; attempt < 101; attempt++ )); do",
+            true
+        ));
+        assert!(has_opaque_evaluation("script/tests/test_claude_review.sh", "if (( expected_status == 2 )); then", true));
     }
 
     #[test]

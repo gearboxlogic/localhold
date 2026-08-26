@@ -24,10 +24,10 @@ fn is_shell_builtin(command: &str) -> bool {
 fn is_standard_utility(command: &str) -> bool {
     matches!(command, "basename" | "cat" | "chmod" | "cmp" | "cp" | "copy-item" | "diff")
         || matches!(command, "dirname" | "head" | "install" | "ln" | "mkdir" | "mktemp" | "mv")
-        || matches!(command, "readlink" | "realpath" | "rm" | "rmdir" | "split" | "tail" | "tee" | "touch" | "unzip")
-        || matches!(command, "grep" | "rg" | "ripgrep" | "seq" | "sort" | "wc")
+        || matches!(command, "readelf" | "readlink" | "realpath" | "rm" | "rmdir" | "split" | "tail")
+        || matches!(command, "tee" | "touch" | "unzip" | "grep" | "rg" | "ripgrep" | "seq" | "sort" | "wc")
         || matches!(command, "cc" | "clang" | "gcc" | "gitleaks" | "rustc" | "rustup")
-        || matches!(command, "sha256sum" | "shasum" | "tar" | "uname" | "zip")
+        || matches!(command, "sha256sum" | "shasum" | "tar" | "uname" | "zip" | "zstd")
         || matches!(command, "kill" | "mapfile" | "readarray" | "sleep")
 }
 
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn data_consumers_are_explicit_and_surface_specific() {
-        for command in ["wc", "head", "diff", "rg", "printf", "tee", "[["] {
+        for command in ["wc", "head", "diff", "rg", "readelf", "zstd", "printf", "tee", "[["] {
             assert!(is_preclassified_command("script/check.sh", command), "{command}");
         }
         assert!(is_preclassified_command("script/test-postgres-smoke.sh", "container_cli"));

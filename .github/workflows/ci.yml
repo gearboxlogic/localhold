@@ -23,7 +23,7 @@ jobs:
     name: Reranker Test (Ubuntu 22.04)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -48,7 +48,7 @@ jobs:
     name: Format + Clippy + Deny + Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -118,7 +118,7 @@ jobs:
           RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -158,7 +158,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -190,7 +190,7 @@ jobs:
       - name: Preserve LF line endings
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -263,7 +263,7 @@ jobs:
           RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         env:
           GIT_CONFIG_COUNT: '1'
           GIT_CONFIG_KEY_0: core.autocrlf

@@ -39,7 +39,7 @@ jobs:
             ${{ runner.os }}-rust-outdated-
             ${{ runner.os }}-rust-
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
         with:
           version: 2026.7.5
 

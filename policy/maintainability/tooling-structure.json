@@ -11,10 +11,11 @@
     "physical_ceiling": 63430
   },
   "source_profile": {
-    "current_sha256": "82e5268265744a86354cc7701ab8dfe631c4e5fc1a67f1f1681f42d3c9eb0a74",
-    "preapproved_next_sha256": "c7e58bb6eed4703d053058abc528db4f8b7c1f42c082a02bf085cc9fc69e76a4",
+    "current_sha256": "c7e58bb6eed4703d053058abc528db4f8b7c1f42c082a02bf085cc9fc69e76a4",
+    "preapproved_next_sha256": null,
     "retired_sha256": [
-      "206b05ac1624e7fb07b5b08a34f60e1d2798ccf275df54b3eb5799ac32ff9d2e"
+      "206b05ac1624e7fb07b5b08a34f60e1d2798ccf275df54b3eb5799ac32ff9d2e",
+      "82e5268265744a86354cc7701ab8dfe631c4e5fc1a67f1f1681f42d3c9eb0a74"
     ]
   },
   "hotspots": [

@@ -8,6 +8,11 @@ requirements explicitly.
 
 ## [Unreleased]
 
+- Updated TLS verifier and root-store dependencies for the eMudhra certificate
+  compromise, and patched additional TLS and constant-time cryptography
+  vulnerabilities.
+- Fixed the Windows audit bootstrap for Git for Windows UCRT installations and
+  a snapshot-readiness race in its regression test.
 - Replaced scopes as the canonical relevance model with governed multi-context
   membership, including private owned contexts, typed identities, hierarchy,
   grants, lifecycle and policy controls, agent resolution and creation tools,
@@ -18,9 +23,11 @@ requirements explicitly.
   callers must send the governed context envelope, retain a legacy `scope`
   adapter, configure a safe default, or explicitly defer with
   `context.allow_unresolved = true`.
-- Added automatic SQLite v2-to-v3 and PostgreSQL v4-to-v5 migrations that
-  backfill existing scopes into canonical context memberships and retire the
-  legacy scope registry while preserving compatibility metadata.
+- Added automatic SQLite v2-to-v3 and PostgreSQL v3-to-v5 migrations from
+  published v0.2.0 databases. These backfill existing scopes into canonical
+  context memberships and retire the legacy scope registry while preserving
+  compatibility metadata. Back up before upgrading; migrated databases cannot
+  be opened by v0.2.0. See [Operations](docs/operations.md) for migration steps.
 - Changed bulk `admin_reembed` to apply per-memory write authorization before
   its limit, leaving inaccessible rows unclaimed and undisclosed while
   preserving process-owned whole-store startup/provider recovery. Authorized

@@ -213,6 +213,16 @@ Replacing a pending value or changing the prepared source after staging is
 rejected. Cancel the stale pending value in a focused pull request, then stage
 the newly observed fingerprint in another pull request.
 
+CI has two audit paths. Ordinary dependency jobs overlay the event-base
+analyzer into their governed snapshot. The protected maintainability job runs
+the workflow revision's analyzer against the full candidate snapshot. During a
+source-profile promotion, the ordinary overlay can retain the previous source
+digest while the candidate policy names the promoted digest. Diagnose that
+mismatch explicitly; all required CI and review gates still apply. Before
+release, verify a fresh pull request based on the merged promotion passes both
+audit paths on their supported platforms. Rerunning the original promotion
+event retains its old base and does not provide that proof.
+
 The analyzer's compiler inputs are deliberately narrower than general Cargo
 supports. Build scripts and automatic target discovery remain disabled; every
 declared non-library target has an explicit `.rs` path under the profiled

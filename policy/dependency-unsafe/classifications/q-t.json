@@ -91,6 +91,11 @@
       "rationale": "The packaged crate defines a build-script or procedural-macro target without another recorded source-exposure signal. This category is descriptive and is not a soundness approval.",
       "review_issue": 124
     },
+    "crates.io:rustls@0.23.46#48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf": {
+      "classification": "other",
+      "rationale": "The packaged crate defines a build-script or procedural-macro target without another recorded source-exposure signal. This category is descriptive and is not a soundness approval. Re-reviewed for the TLS security maintenance update; the source exposure category remains unchanged.",
+      "review_issue": 124
+    },
     "crates.io:rustversion@1.0.22#b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d": {
       "classification": "other",
       "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",

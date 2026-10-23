@@ -105,6 +105,9 @@ if [[ $kernel == Linux && $machine == x86_64 ]]; then
 elif [[ $kernel == MINGW* || $kernel == MSYS* || $kernel == CYGWIN* ]] && [[ $machine == x86_64 ]]; then
     tool_extension=.exe
     curl_command=/mingw64/bin/curl.exe
+    if [[ -x /ucrt64/bin/curl.exe ]]; then
+        curl_command=/ucrt64/bin/curl.exe
+    fi
     rustup_archive_url=https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-pc-windows-msvc/rustup-init.exe
     expected_rustup_sha256=86478e53f769379d7f0ebfa7c9aa97cb76ca92233f79aa2cc0dbee2efaac73c7
     expected_cargo_sha256=3cd119fe81dfedb9dce4573696bf65058f16b57c9e5babe415b71624315cbb7d
@@ -299,7 +302,7 @@ if [[ $windows_toolchain == true ]]; then
         printf 'maintainability gate requires an OS-owned Visual Studio Hostx64 linker\n' >&2
         exit 1
     fi
-    trusted_path="$trusted_linker_bin:/usr/bin:/mingw64/bin:/c/Windows/System32"
+    trusted_path="$trusted_linker_bin:/usr/bin:/ucrt64/bin:/mingw64/bin:/c/Windows/System32"
 fi
 CARGO=$native_cargo
 RUSTC=$native_rustc
@@ -429,8 +432,8 @@ case "$mode" in
     source-safety) run_source_safety ;;
     dependency-unsafe) run_dependency_unsafe ;;
     maintainability)
-        run_source_safety
         run_dependency_unsafe
+        run_source_safety
         ;;
     test-environment) verify_test_environment ;;
 esac

@@ -41,14 +41,14 @@
       "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
       "review_issue": 124
     },
-    "crates.io:aws-lc-rs@1.17.0#5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00": {
+    "crates.io:aws-lc-rs@1.18.2#faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13": {
       "classification": "other",
-      "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",
+      "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval. Re-reviewed for the rustls-webpki 0.103.16 certificate-distrust update; the native cryptography boundary remains conservatively classified.",
       "review_issue": 124
     },
-    "crates.io:aws-lc-sys@0.41.0#1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4": {
+    "crates.io:aws-lc-sys@0.46.0#f1622d8446a2d4b2ce0c7eefc73dd43a99779028d5ee5c2dd8073a658ba8a2bc": {
       "classification": "generated-bindings",
-      "rationale": "The packaged source is a checksum-bound system binding crate with generated and/or foreign-interface exposure. This category is descriptive and is not a soundness approval.",
+      "rationale": "The packaged source is a checksum-bound system binding crate with generated and/or foreign-interface exposure. This category is descriptive and is not a soundness approval. Re-reviewed for the rustls-webpki 0.103.16 certificate-distrust update; the native cryptography boundary remains conservatively classified.",
       "review_issue": 124
     },
     "crates.io:base64ct@1.8.3#2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06": {
@@ -101,9 +101,9 @@
       "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",
       "review_issue": 124
     },
-    "crates.io:chacha20@0.10.0#6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601": {
+    "crates.io:chacha20@0.10.2#65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06": {
       "classification": "pure-rust-unchecked",
-      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval. Re-reviewed for the TLS security maintenance update; the source exposure category remains unchanged.",
       "review_issue": 124
     },
     "crates.io:chrono@0.4.45#1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327": {
@@ -226,9 +226,9 @@
       "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
       "review_issue": 124
     },
-    "crates.io:der@0.8.0#71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b": {
+    "crates.io:der@0.8.2#a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a": {
       "classification": "pure-rust-unchecked",
-      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
+      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval. Re-reviewed for the TLS security maintenance update; the source exposure category remains unchanged.",
       "review_issue": 124
     },
     "crates.io:deranged@0.5.8#7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c": {

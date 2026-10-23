@@ -10,6 +10,7 @@ pub(super) struct LegacyTransitionBridge {
     pub(super) path: &'static str,
     pub(super) current: &'static str,
     pub(super) successor: &'static str,
+    pub(super) retired: &'static [&'static str],
     pub(super) opaque_execution_inputs: bool,
     pub(super) weakening: bool,
 }
@@ -20,6 +21,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
         path: "script/bootstrap.sh",
         current: "36982c49561af13986fc34ddeefd759010cd615980604eca34d09ef5ba0358c3",
         successor: "e0302179ecc01f9feb178b74420db156736c04e33a4e67d304fa3bc2390fdbf3",
+        retired: &[],
         opaque_execution_inputs: true,
         weakening: false,
     },
@@ -27,6 +29,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
         path: "script/dep-audit.sh",
         current: "5542706978c03c28159305257466a32566fd66bcae9c7502de4be91fa45ae7d1",
         successor: "03b36529705c704b244dd5e128e1dd1461a66677bdda0bcceedaa582015160dc",
+        retired: &[],
         opaque_execution_inputs: true,
         weakening: false,
     },
@@ -34,27 +37,31 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
         path: "script/test-postgres-smoke.sh",
         current: "2f54d872c4773e0ade58b2c0d70bf37e43a477ab809b5ad454195af895169066",
         successor: "88a8e659f6e4c238041d037e4a49301806361a42c48706241c39ee8ad01e9724",
+        retired: &[],
         opaque_execution_inputs: true,
         weakening: false,
     },
     LegacyTransitionBridge {
         path: "script/check-maintainability-bootstrap.sh",
-        current: "adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa",
+        current: "1bc3bdb7680e7aaf5feea5752f9668d1dcf4852b7e90154372cf3509da79e606",
         successor: "331c853d39f6d29cfa79ab52f40b98f0fc8257abf2c2a61be02742215d3d8e85",
+        retired: &["adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa"],
         opaque_execution_inputs: true,
         weakening: true,
     },
     LegacyTransitionBridge {
         path: "script/run-maintainability-gate.sh",
-        current: "82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8",
+        current: "cc86d20e2e84265a90b96ab962c9a247f33d85d507e8f7e9dfa9930d22f914c4",
         successor: "5c341c8cd104d894e11e0b8fd940d547c3e19dd0650a885bcbc467a04f7a362d",
+        retired: &["82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8"],
         opaque_execution_inputs: false,
         weakening: true,
     },
     LegacyTransitionBridge {
         path: "script/tests/test_maintainability_bootstrap.sh",
-        current: "3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40",
+        current: "6452490d346f715b6636376fc669b8696e356d428a46b26b500b86e007fda79f",
         successor: "cf063129223ae96483e06690677310b878b0c1ebdf3286e43f963740fdc5cb64",
+        retired: &["3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40"],
         opaque_execution_inputs: false,
         weakening: true,
     },
@@ -62,6 +69,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
         path: "script/claude-review.sh",
         current: "c6c56c0212389a349b4a39e95d2578310bcc1a13bcbe8377c010ca69d1aefc8a",
         successor: "7a0b509574ded78ba3c0589bae798b4e6d7d7658e5bebe48515a3ae73fafbc78",
+        retired: &[],
         opaque_execution_inputs: true,
         weakening: true,
     },
@@ -69,13 +77,15 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
         path: "script/tests/test_claude_review.sh",
         current: "41c33e1d76f36d8c9e5050a15b24de19c3044078694170d95d672657f6f8940c",
         successor: "e3d3dfedbb7823e3505d5bf2393656e2d464929892686a83b66df6e9f6f0b07b",
+        retired: &[],
         opaque_execution_inputs: false,
         weakening: true,
     },
     LegacyTransitionBridge {
         path: ".github/workflows/ci.yml",
-        current: "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5",
+        current: "e56073647b6f2c9677e4d60850dbd1b900dd1a93d60a3d900393f9a94d5a8b6f",
         successor: "303a407a407d004e5c06f033fe1304bc61d5b58be192b37437763fd972d34006",
+        retired: &["a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5"],
         opaque_execution_inputs: false,
         weakening: true,
     },
@@ -83,6 +93,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
         path: ".github/workflows/trusted-maintainability.yml",
         current: "c2a4437c282c0a68f1be6e87358e657cc737b723bdeb48fc651e28aea5915556",
         successor: "685ee36e2c66e8bbaba0038c0d01f91b0bf52e61a129d48b8bde96ba425cb1a2",
+        retired: &[],
         opaque_execution_inputs: false,
         weakening: true,
     },
@@ -125,15 +136,12 @@ impl ProfileManifest {
 
     pub(super) fn legacy_transition_bridge(&self, path: &str, source: &str) -> Option<LegacyTransitionBridge> {
         let observed = format!("{:x}", Sha256::digest(source.as_bytes()));
-        let profile = self
-            .profiles
-            .iter()
-            .find(|profile| profile.path == path && profile.current_sha256 == observed && profile.retired_sha256.is_empty())?;
+        let profile = self.profiles.iter().find(|profile| profile.path == path && profile.current_sha256 == observed)?;
         let staged_transition = (profile.path.as_str(), profile.current_sha256.as_str(), profile.preapproved_next_sha256.as_deref()?);
         LEGACY_TRANSITION_BRIDGES
             .iter()
             .copied()
-            .find(|bridge| (bridge.path, bridge.current, bridge.successor) == staged_transition)
+            .find(|bridge| (bridge.path, bridge.current, bridge.successor) == staged_transition && profile.retired_sha256 == bridge.retired)
     }
 
     pub(super) fn compare_previous(&self, previous: &Self) -> Result<()> {
@@ -256,6 +264,15 @@ mod tests {
 
             let mut changed = ProfileManifest::parse(&fs::read(workspace.join(POLICY_PATH)).expect("checked-in profile policy")).expect("profile policy");
             let profile = changed.profiles.iter_mut().find(|profile| profile.path == bridge.path).expect("bridge profile");
+            let mut changed_history = ProfileManifest::parse(&fs::read(workspace.join(POLICY_PATH)).expect("checked-in policy")).expect("profile policy");
+            changed_history
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.path == bridge.path)
+                .expect("bridge profile")
+                .retired_sha256
+                .push("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned());
+            assert!(changed_history.legacy_transition_bridge(bridge.path, &source).is_none());
             profile.preapproved_next_sha256 = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned());
             assert!(changed.legacy_transition_bridge(bridge.path, &source).is_none());
         }

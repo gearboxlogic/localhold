@@ -71,7 +71,7 @@ pub(super) fn is_reviewed(candidate: &Candidate<'_>) -> bool {
             [assignment, tool]
                 if assignment == &format!("{}=$(trusted_system_command", candidate.name)
                     && tool == &format!("{expected_tool})")
-                    && exact_function(candidate.source, "trusted_system_command", TRUSTED_SYSTEM_COMMAND)
+                    && has_trusted_system_command(candidate.source)
         );
     }
     candidate.path == "script/run-maintainability-gate.sh"
@@ -111,6 +111,11 @@ fn reviewed_authenticated_tool(name: &str, command: &[String]) -> bool {
 
 pub(super) fn has_trusted_system_command(source: &str) -> bool {
     exact_function(source, "trusted_system_command", TRUSTED_SYSTEM_COMMAND)
+        || exact_function(
+            source,
+            "trusted_system_command",
+            &TRUSTED_SYSTEM_COMMAND.replace("/mingw64/bin)", "/mingw64/bin | /ucrt64/bin)"),
+        )
 }
 
 fn exact_function(source: &str, name: &str, definition: &str) -> bool {
@@ -132,6 +137,16 @@ fn exact_function(source: &str, name: &str, definition: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{AUTHENTICATED_TOOL, GATE_SHA256_FILE, TRUSTED_SYSTEM_COMMAND, exact_function};
+
+    #[test]
+    fn ucrt_system_resolver_retains_exact_directory_boundary() {
+        let updated = TRUSTED_SYSTEM_COMMAND.replace("/mingw64/bin)", "/mingw64/bin | /ucrt64/bin)");
+        assert!(super::has_trusted_system_command(TRUSTED_SYSTEM_COMMAND));
+        assert!(super::has_trusted_system_command(&updated));
+        assert!(!super::has_trusted_system_command(&updated.replace("/ucrt64/bin", "/tmp/bin")));
+        assert!(!super::has_trusted_system_command(&updated.replace("/ucrt64/bin", "/ucrt64/*")));
+        assert!(!super::has_trusted_system_command(&updated.replace("type -P", "printf /tmp/helper")));
+    }
 
     #[test]
     fn resolver_functions_are_whole_definition_profiles() {

@@ -98,7 +98,11 @@ fn is_reviewed_literal_program_assignment(path: &str, name: &str, value: &str) -
             | ("script/run-maintainability-gate.sh", "mkdir_command", "/usr/bin/mkdir")
             | ("script/run-maintainability-gate.sh", "mktemp_command", "/usr/bin/mktemp")
             | ("script/run-maintainability-gate.sh", "rm_command", "/usr/bin/rm")
-            | ("script/run-maintainability-gate.sh", "curl_command", "/usr/bin/curl" | "/mingw64/bin/curl.exe")
+            | (
+                "script/run-maintainability-gate.sh",
+                "curl_command",
+                "/usr/bin/curl" | "/mingw64/bin/curl.exe" | "/ucrt64/bin/curl.exe"
+            )
             | ("script/run-maintainability-gate.sh", "cygpath_command", "/usr/bin/cygpath")
             | (
                 "script/run-maintainability-gate.sh",

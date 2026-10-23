@@ -102,6 +102,7 @@ pub(super) const GATE_RUNNER_ENVIRONMENT_LINES: &[&str] = &[
     "resolved_cargo=$(RUSTUP_HOME=$rustup_environment \"$rustup_executable\" which --toolchain 1.97.0 cargo) || {",
     "trusted_path=\"/usr/bin:/bin\"",
     "    trusted_path=\"$trusted_linker_bin:/usr/bin:/mingw64/bin:/c/Windows/System32\"",
+    "    trusted_path=\"$trusted_linker_bin:/usr/bin:/ucrt64/bin:/mingw64/bin:/c/Windows/System32\"",
     "compatibility_bin=\"$target_directory/b\"",
     "compatibility_rustc=\"$compatibility_bin/$rustc_name\"",
     "compatibility_cargo_clippy=\"$compatibility_bin/$cargo_clippy_name\"",

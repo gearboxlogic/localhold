@@ -117,8 +117,8 @@ readonly reviewed_justfile_sha256=e7e0630e3bf9a4c042ab90c888fcdc46c3b9ccfd5c650d
 readonly reviewed_mise_config_sha256=627903d61cd155a318e0dffa4a29052099fbed1834bd485e7859fdcad03c0529
 readonly reviewed_mise_lockfile_sha256=24a3c64cbd2123ba9ab457eba21a65c7960d189d6685fe1d2bfd4a979134c358
 readonly reviewed_runner_sha256=cd756b8a6039e1192bb0c95e7c42e66148f7b883f3b12662b31c70269165a468
-readonly reviewed_bootstrap_tests_sha256=3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40
-readonly reviewed_gate_runner_sha256=82609774f45011fa7a6260a3841fb49a7304047c1ca1faa5c62869c9524819d8
+readonly reviewed_bootstrap_tests_sha256=df5a182d0a7ce38062926b1d61b035ec7783ec3b2c2a50ecef0153c9ed59b503
+readonly reviewed_gate_runner_sha256=cc86d20e2e84265a90b96ab962c9a247f33d85d507e8f7e9dfa9930d22f914c4
 
 for reviewed_path in "$manifest" "$lockfile" "$justfile" "$mise_config" "$mise_lockfile" "$runner" "$bootstrap_tests" "$gate_runner"; do
     if [[ ! -f "$reviewed_path" || -L "$reviewed_path" ]]; then
@@ -177,7 +177,7 @@ trusted_system_command() {
     directory=$(cd -- "$directory" && pwd -P)
     candidate="$directory/${candidate##*/}"
     case "$directory" in
-        /bin | /usr/bin | /mingw64/bin) ;;
+        /bin | /usr/bin | /mingw64/bin | /ucrt64/bin) ;;
         *)
             printf 'maintainability bootstrap requires an OS-owned command: %s\n' "$candidate" >&2
             exit 1

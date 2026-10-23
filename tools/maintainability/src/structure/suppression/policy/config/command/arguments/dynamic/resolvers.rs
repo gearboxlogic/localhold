@@ -71,7 +71,7 @@ pub(super) fn is_reviewed(candidate: &Candidate<'_>) -> bool {
             [assignment, tool]
                 if assignment == &format!("{}=$(trusted_system_command", candidate.name)
                     && tool == &format!("{expected_tool})")
-                    && exact_function(candidate.source, "trusted_system_command", TRUSTED_SYSTEM_COMMAND)
+                    && has_trusted_system_command(candidate.source)
         );
     }
     candidate.path == "script/run-maintainability-gate.sh"
@@ -111,6 +111,11 @@ fn reviewed_authenticated_tool(name: &str, command: &[String]) -> bool {
 
 pub(super) fn has_trusted_system_command(source: &str) -> bool {
     exact_function(source, "trusted_system_command", TRUSTED_SYSTEM_COMMAND)
+        || exact_function(
+            source,
+            "trusted_system_command",
+            &TRUSTED_SYSTEM_COMMAND.replace("/mingw64/bin)", "/mingw64/bin | /ucrt64/bin)"),
+        )
 }
 
 fn exact_function(source: &str, name: &str, definition: &str) -> bool {
@@ -129,9 +134,48 @@ fn exact_function(source: &str, name: &str, definition: &str) -> bool {
     command_source.lines().nth(line_index).is_some_and(|line| line.trim_start() == declaration) && tokens::declared_shell_function_count(&command_source, name) == 1
 }
 
+pub(super) fn is_reviewed_literal_program_assignment(path: &str, name: &str, value: &str) -> bool {
+    matches!(
+        (path, name, value),
+        ("script/run-maintainability-gate.sh", "sha256_command", "/usr/bin/sha256sum")
+            | ("script/run-maintainability-gate.sh", "uname_command", "/usr/bin/uname")
+            | ("script/run-maintainability-gate.sh", "bash_command", "/usr/bin/bash")
+            | ("script/run-maintainability-gate.sh", "chmod_command", "/usr/bin/chmod")
+            | ("script/run-maintainability-gate.sh", "cp_command", "/usr/bin/cp")
+            | ("script/run-maintainability-gate.sh", "env_command", "/usr/bin/env")
+            | ("script/run-maintainability-gate.sh", "ln_command", "/usr/bin/ln")
+            | ("script/run-maintainability-gate.sh", "mkdir_command", "/usr/bin/mkdir")
+            | ("script/run-maintainability-gate.sh", "mktemp_command", "/usr/bin/mktemp")
+            | ("script/run-maintainability-gate.sh", "rm_command", "/usr/bin/rm")
+            | (
+                "script/run-maintainability-gate.sh",
+                "curl_command",
+                "/usr/bin/curl" | "/mingw64/bin/curl.exe" | "/ucrt64/bin/curl.exe"
+            )
+            | ("script/run-maintainability-gate.sh", "cygpath_command", "/usr/bin/cygpath")
+            | (
+                "script/run-maintainability-gate.sh",
+                "vswhere_command",
+                "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            )
+            | ("script/test-postgres-smoke.sh", "container_cli", "docker" | "podman")
+            | (".github/workflows/ci.yml", "binary", "target/x86_64-pc-windows-msvc/release/hold.exe")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AUTHENTICATED_TOOL, GATE_SHA256_FILE, TRUSTED_SYSTEM_COMMAND, exact_function};
+
+    #[test]
+    fn ucrt_system_resolver_retains_exact_directory_boundary() {
+        let updated = TRUSTED_SYSTEM_COMMAND.replace("/mingw64/bin)", "/mingw64/bin | /ucrt64/bin)");
+        assert!(super::has_trusted_system_command(TRUSTED_SYSTEM_COMMAND));
+        assert!(super::has_trusted_system_command(&updated));
+        assert!(!super::has_trusted_system_command(&updated.replace("/ucrt64/bin", "/tmp/bin")));
+        assert!(!super::has_trusted_system_command(&updated.replace("/ucrt64/bin", "/ucrt64/*")));
+        assert!(!super::has_trusted_system_command(&updated.replace("type -P", "printf /tmp/helper")));
+    }
 
     #[test]
     fn resolver_functions_are_whole_definition_profiles() {

@@ -138,6 +138,7 @@ restore_reviewed_graph
         snapshot=${snapshot_candidates[0]}
         if [[ -d $snapshot/target ]] &&
             has_write_mode_bits "$snapshot/target" &&
+            has_write_mode_bits "$snapshot/.cache" &&
             ! has_write_mode_bits "$snapshot/tools/maintainability/src/main.rs"; then
             if mkdir -p "$snapshot/target/dependency-unsafe/actual-test" 2>/dev/null; then
                 printf 'preserved evidence\n' >"$snapshot/target/dependency-unsafe/actual-test/evidence.txt"

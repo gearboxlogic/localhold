@@ -69,7 +69,7 @@ pub(super) fn is_absolute(candidate: &str) -> bool {
 }
 
 pub(super) fn trusted_system_program(command: &str) -> bool {
-    ["/bin/", "/usr/bin/", "/mingw64/bin/"].iter().any(|prefix| {
+    ["/bin/", "/usr/bin/", "/mingw64/bin/", "/ucrt64/bin/"].iter().any(|prefix| {
         command
             .strip_prefix(prefix)
             .is_some_and(|name| !name.is_empty() && !name.contains(['/', '\\']) && !contains_dynamic_value(name))
@@ -89,6 +89,23 @@ fn windows_drive_prefix(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ProgramPath, ValueSemantics, normalize_literal_with_semantics, select_program, select_program_with_semantics};
+
+    #[test]
+    fn ucrt_programs_require_exact_system_directory() {
+        for command in ["/ucrt64/bin/git", "/ucrt64/bin/curl.exe", "/mingw64/bin/git"] {
+            assert!(super::trusted_system_program(command), "{command}");
+        }
+        for command in [
+            "/tmp/ucrt64/bin/git",
+            "/ucrt64/bin/../git",
+            "/ucrt64/bin/nested/git",
+            "/ucrt64/bin/$TOOL",
+            "/ucrt64/bin/",
+            "/ucrt64/bin-other/git",
+        ] {
+            assert!(!super::trusted_system_program(command), "{command}");
+        }
+    }
 
     #[test]
     fn runtime_absolute_programs_fail_closed() {

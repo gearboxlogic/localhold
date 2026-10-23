@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn checked_in_python_tree_matches_one_atomic_profile() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let workspace = crate::workspace_root().expect("audit workspace");
         validate(&workspace).expect("reviewed Python source profile");
     }
 

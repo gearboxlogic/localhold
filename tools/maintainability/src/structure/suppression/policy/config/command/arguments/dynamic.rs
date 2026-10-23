@@ -4,7 +4,6 @@ use super::{is_environment_assignment, is_rust_subcommand, is_rust_tool_token, i
 
 mod builtins;
 mod resolvers;
-use resolvers::is_reviewed_literal_program_assignment;
 
 pub(super) fn has_rust_tool_assignment_flow(source: &str, case_insensitive_tools: bool) -> bool {
     let assigned_rust_tools = assigned_rust_tool_variables(source, case_insensitive_tools);
@@ -84,6 +83,35 @@ fn opaque_command_assignment(path: &str, assignment: (&str, &str), command: &[St
         return opaque_command_substitution(path, name, command, source, source_is_reviewed);
     }
     true
+}
+
+fn is_reviewed_literal_program_assignment(path: &str, name: &str, value: &str) -> bool {
+    matches!(
+        (path, name, value),
+        ("script/run-maintainability-gate.sh", "sha256_command", "/usr/bin/sha256sum")
+            | ("script/run-maintainability-gate.sh", "uname_command", "/usr/bin/uname")
+            | ("script/run-maintainability-gate.sh", "bash_command", "/usr/bin/bash")
+            | ("script/run-maintainability-gate.sh", "chmod_command", "/usr/bin/chmod")
+            | ("script/run-maintainability-gate.sh", "cp_command", "/usr/bin/cp")
+            | ("script/run-maintainability-gate.sh", "env_command", "/usr/bin/env")
+            | ("script/run-maintainability-gate.sh", "ln_command", "/usr/bin/ln")
+            | ("script/run-maintainability-gate.sh", "mkdir_command", "/usr/bin/mkdir")
+            | ("script/run-maintainability-gate.sh", "mktemp_command", "/usr/bin/mktemp")
+            | ("script/run-maintainability-gate.sh", "rm_command", "/usr/bin/rm")
+            | (
+                "script/run-maintainability-gate.sh",
+                "curl_command",
+                "/usr/bin/curl" | "/mingw64/bin/curl.exe" | "/ucrt64/bin/curl.exe"
+            )
+            | ("script/run-maintainability-gate.sh", "cygpath_command", "/usr/bin/cygpath")
+            | (
+                "script/run-maintainability-gate.sh",
+                "vswhere_command",
+                "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            )
+            | ("script/test-postgres-smoke.sh", "container_cli", "docker" | "podman")
+            | (".github/workflows/ci.yml", "binary", "target/x86_64-pc-windows-msvc/release/hold.exe")
+    )
 }
 
 fn is_reviewed_parameter_program_assignment(path: &str, name: &str, value: &str, command: &[String]) -> bool {

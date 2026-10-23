@@ -202,6 +202,11 @@ const ARGUMENT_PROFILES: &[ArgumentProfile] = &[
         "mkdir_command",
         &["--", "$snapshot_root/target", "$audit_scratch_root"],
     ),
+    profile(
+        "script/check-maintainability-bootstrap.sh",
+        "mkdir_command",
+        &["--", "$snapshot_root/target/dependency-unsafe"],
+    ),
     profile("script/check-maintainability-bootstrap.sh", "chmod_command", &["-R", "a-w", "--", "$snapshot_root"]),
     profile(
         "script/check-maintainability-bootstrap.sh",

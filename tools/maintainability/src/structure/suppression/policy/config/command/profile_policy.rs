@@ -43,7 +43,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     },
     LegacyTransitionBridge {
         path: "script/check-maintainability-bootstrap.sh",
-        current: "55a391cf4e9c81911d6d74284c6886a9995e34cc0bcd64f8df17ce72cf6dc486",
+        current: "1bc3bdb7680e7aaf5feea5752f9668d1dcf4852b7e90154372cf3509da79e606",
         successor: "331c853d39f6d29cfa79ab52f40b98f0fc8257abf2c2a61be02742215d3d8e85",
         retired: &["adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa"],
         opaque_execution_inputs: true,
@@ -59,7 +59,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     },
     LegacyTransitionBridge {
         path: "script/tests/test_maintainability_bootstrap.sh",
-        current: "df5a182d0a7ce38062926b1d61b035ec7783ec3b2c2a50ecef0153c9ed59b503",
+        current: "6452490d346f715b6636376fc669b8696e356d428a46b26b500b86e007fda79f",
         successor: "cf063129223ae96483e06690677310b878b0c1ebdf3286e43f963740fdc5cb64",
         retired: &["3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40"],
         opaque_execution_inputs: false,
@@ -83,7 +83,7 @@ const LEGACY_TRANSITION_BRIDGES: &[LegacyTransitionBridge] = &[
     },
     LegacyTransitionBridge {
         path: ".github/workflows/ci.yml",
-        current: "7d08af4c89a43746e227c7832ad552738778a7c76bcd4247fe83c0d342ad2530",
+        current: "e56073647b6f2c9677e4d60850dbd1b900dd1a93d60a3d900393f9a94d5a8b6f",
         successor: "303a407a407d004e5c06f033fe1304bc61d5b58be192b37437763fd972d34006",
         retired: &["a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5"],
         opaque_execution_inputs: false,
@@ -242,4 +242,111 @@ fn validate_sha256(value: &str, label: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn checked_in_legacy_transition_inventory_is_exact() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = ProfileManifest::parse(&fs::read(workspace.join(POLICY_PATH)).expect("checked-in profile policy")).expect("profile policy");
+        assert_eq!(
+            manifest.profiles().iter().filter(|profile| profile.preapproved_next_sha256.is_some()).count(),
+            LEGACY_TRANSITION_BRIDGES.len()
+        );
+
+        for bridge in LEGACY_TRANSITION_BRIDGES {
+            let source = fs::read_to_string(workspace.join(bridge.path)).expect("checked-in bridge source");
+            assert!(manifest.legacy_transition_bridge(bridge.path, &source).is_some());
+            assert!(manifest.legacy_transition_bridge(bridge.path, &format!("{source}\n# tampered")).is_none());
+
+            let mut changed = ProfileManifest::parse(&fs::read(workspace.join(POLICY_PATH)).expect("checked-in profile policy")).expect("profile policy");
+            let profile = changed.profiles.iter_mut().find(|profile| profile.path == bridge.path).expect("bridge profile");
+            let mut changed_history = ProfileManifest::parse(&fs::read(workspace.join(POLICY_PATH)).expect("checked-in policy")).expect("profile policy");
+            changed_history
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.path == bridge.path)
+                .expect("bridge profile")
+                .retired_sha256
+                .push("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned());
+            assert!(changed_history.legacy_transition_bridge(bridge.path, &source).is_none());
+            profile.preapproved_next_sha256 = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned());
+            assert!(changed.legacy_transition_bridge(bridge.path, &source).is_none());
+        }
+    }
+
+    fn manifest(current: &str, next: Option<&str>, retired: &[&str]) -> ProfileManifest {
+        let next = next.map_or_else(|| "null".to_owned(), |digest| format!("\"{digest}\""));
+        let retired = retired.iter().map(|digest| format!("\"{digest}\"")).collect::<Vec<_>>().join(",");
+        let source = format!(
+            r#"{{
+                "schema_version": 1,
+                "profiles": [{{
+                    "id": "reviewed",
+                    "path": "script/reviewed.sh",
+                    "current_sha256": "{current}",
+                    "preapproved_next_sha256": {next},
+                    "retired_sha256": [{retired}],
+                    "issue": "https://example.invalid/1",
+                    "rationale": "Reviewed dynamic cleanup.",
+                    "safety_invariant": "The exact command and complete source are pinned."
+                }}]
+            }}"#
+        );
+        ProfileManifest::parse(source.as_bytes()).expect("profile manifest")
+    }
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn transitions_are_bounded_and_one_way() {
+        let current = manifest(A, None, &[]);
+        let staged = manifest(A, Some(B), &[]);
+        staged.compare_previous(&current).expect("stage successor");
+
+        let promoted = manifest(B, None, &[A]);
+        promoted.compare_previous(&staged).expect("promote successor");
+        assert!(current.compare_previous(&promoted).is_err());
+        assert!(manifest(A, None, &[B]).compare_previous(&promoted).is_err());
+        assert!(manifest(C, None, &[A, B]).compare_previous(&promoted).is_err());
+    }
+
+    #[test]
+    fn pending_successor_can_only_be_cancelled_before_promotion() {
+        let current = manifest(A, None, &[]);
+        let staged = manifest(A, Some(B), &[]);
+        current.compare_previous(&staged).expect("cancel successor");
+        assert!(manifest(A, Some(C), &[]).compare_previous(&staged).is_err());
+        assert!(manifest(B, Some(C), &[A]).compare_previous(&staged).is_err());
+    }
+
+    #[test]
+    fn validated_transition_authorizes_only_the_current_source() {
+        let old_source = "old source\n";
+        let new_source = "new source\n";
+        let old = format!("{:x}", Sha256::digest(old_source));
+        let new = format!("{:x}", Sha256::digest(new_source));
+
+        let initial = manifest(&old, None, &[]);
+        let staged = manifest(&old, Some(&new), &[]);
+        staged.compare_previous(&initial).expect("stage successor");
+        assert!(staged.source_is_current("script/reviewed.sh", old_source));
+        assert!(!staged.source_is_current("script/reviewed.sh", new_source));
+        assert!(staged.legacy_transition_bridge("script/reviewed.sh", old_source).is_none());
+        assert!(staged.legacy_transition_bridge("script/reviewed.sh", new_source).is_none());
+        assert!(initial.legacy_transition_bridge("script/reviewed.sh", old_source).is_none());
+
+        let promoted = manifest(&new, None, &[&old]);
+        promoted.compare_previous(&staged).expect("promote successor");
+        assert!(promoted.source_is_current("script/reviewed.sh", new_source));
+        assert!(!promoted.source_is_current("script/reviewed.sh", old_source));
+        assert!(promoted.legacy_transition_bridge("script/reviewed.sh", new_source).is_none());
+        assert!(manifest(&new, None, &[]).compare_previous(&initial).is_err());
+        assert!(manifest(&old, Some(A), &[]).compare_previous(&staged).is_err());
+    }
+}

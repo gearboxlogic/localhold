@@ -136,7 +136,7 @@ restore_reviewed_graph
     while (( SECONDS < deadline )); do
         snapshot_candidates=("$test_repository"/target/s.*)
         snapshot=${snapshot_candidates[0]}
-        if [[ -d $snapshot/target ]] &&
+        if [[ -d $snapshot/target/dependency-unsafe ]] &&
             has_write_mode_bits "$snapshot/target" &&
             has_write_mode_bits "$snapshot/.cache" &&
             ! has_write_mode_bits "$snapshot/tools/maintainability/src/main.rs"; then

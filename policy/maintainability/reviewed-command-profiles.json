@@ -14,7 +14,7 @@
     {
       "id": "fixture-bootstrap",
       "path": "script/tests/test_maintainability_bootstrap.sh",
-      "current_sha256": "df5a182d0a7ce38062926b1d61b035ec7783ec3b2c2a50ecef0153c9ed59b503",
+      "current_sha256": "6452490d346f715b6636376fc669b8696e356d428a46b26b500b86e007fda79f",
       "preapproved_next_sha256": "cf063129223ae96483e06690677310b878b0c1ebdf3286e43f963740fdc5cb64",
       "retired_sha256": [
         "3532c926ba6e350b6235a1408b660a34c99867af81251e3cee7f541a9da16f40"
@@ -66,7 +66,7 @@
     {
       "id": "protected-bootstrap",
       "path": "script/check-maintainability-bootstrap.sh",
-      "current_sha256": "55a391cf4e9c81911d6d74284c6886a9995e34cc0bcd64f8df17ce72cf6dc486",
+      "current_sha256": "1bc3bdb7680e7aaf5feea5752f9668d1dcf4852b7e90154372cf3509da79e606",
       "preapproved_next_sha256": "331c853d39f6d29cfa79ab52f40b98f0fc8257abf2c2a61be02742215d3d8e85",
       "retired_sha256": [
         "adb17c8d29a05de989beca2be7e653310594f7e979ca4c68b72fc4f5f71489aa"
@@ -130,7 +130,7 @@
     {
       "id": "ci-workflow",
       "path": ".github/workflows/ci.yml",
-      "current_sha256": "7d08af4c89a43746e227c7832ad552738778a7c76bcd4247fe83c0d342ad2530",
+      "current_sha256": "e56073647b6f2c9677e4d60850dbd1b900dd1a93d60a3d900393f9a94d5a8b6f",
       "preapproved_next_sha256": "303a407a407d004e5c06f033fe1304bc61d5b58be192b37437763fd972d34006",
       "retired_sha256": [
         "a3caaf8313e9aff92fafa5103a43da607eea095a63e9cb7102839a1084a0a0b5"

@@ -41,19 +41,9 @@
       "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
       "review_issue": 124
     },
-    "crates.io:aws-lc-rs@1.17.0#5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00": {
-      "classification": "other",
-      "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",
-      "review_issue": 124
-    },
     "crates.io:aws-lc-rs@1.18.2#faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13": {
       "classification": "other",
       "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval. Re-reviewed for the rustls-webpki 0.103.16 certificate-distrust update; the native cryptography boundary remains conservatively classified.",
-      "review_issue": 124
-    },
-    "crates.io:aws-lc-sys@0.41.0#1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4": {
-      "classification": "generated-bindings",
-      "rationale": "The packaged source is a checksum-bound system binding crate with generated and/or foreign-interface exposure. This category is descriptive and is not a soundness approval.",
       "review_issue": 124
     },
     "crates.io:aws-lc-sys@0.46.0#f1622d8446a2d4b2ce0c7eefc73dd43a99779028d5ee5c2dd8073a658ba8a2bc": {
@@ -109,11 +99,6 @@
     "crates.io:cc@1.2.63#556e016178bb5662a08681bbe0f00f8e17631781a4dfc8c45e466e4b185ec27f": {
       "classification": "other",
       "rationale": "The packaged source has mixed native, prebuilt, generated, or Rust unsafe exposure and is conservatively ungrouped pending package-family review. This category is not a soundness approval.",
-      "review_issue": 124
-    },
-    "crates.io:chacha20@0.10.0#6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601": {
-      "classification": "pure-rust-unchecked",
-      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
       "review_issue": 124
     },
     "crates.io:chacha20@0.10.2#65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06": {
@@ -237,11 +222,6 @@
       "review_issue": 124
     },
     "crates.io:dary_heap@0.3.9#8b1e3a325bc115f096c8b77bbf027a7c2592230e70be2d985be950d3d5e60ebe": {
-      "classification": "pure-rust-unchecked",
-      "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
-      "review_issue": 124
-    },
-    "crates.io:der@0.8.0#71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b": {
       "classification": "pure-rust-unchecked",
       "rationale": "The packaged source contains Rust unsafe syntax or assembly and no native, prebuilt, or generated-source signal. This category is descriptive and is not a soundness approval.",
       "review_issue": 124
